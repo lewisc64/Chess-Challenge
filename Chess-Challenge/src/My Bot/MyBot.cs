@@ -99,15 +99,17 @@ public class MyBot : IChessBot
         return move!.Value;
     }
 
-    private (Move? Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, bool maximizing = true, double bestMax = double.MinValue, double bestMin = double.MaxValue)
+    private (Move? Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double bestMax = double.MinValue, double bestMin = double.MaxValue)
     {
+        var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
+
         if (depth >= 4 && timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
         {
             throw new TimeoutException();
         }
         else if (board.IsInCheckmate())
         {
-            return (null, board.IsWhiteToMove && playingAsWhite ? -1000 * (maxDepth - depth + 1) : 1000 * (maxDepth - depth + 1));
+            return (null, isOurTurn ? -1000 * (maxDepth - depth + 1) : 1000 * (maxDepth - depth + 1));
         }
         else if (board.IsDraw())
         {
@@ -119,7 +121,7 @@ public class MyBot : IChessBot
         }
 
         Move? bestMove = null;
-        var bestMoveScore = maximizing ? double.MinValue : double.MaxValue;
+        var bestMoveScore = isOurTurn ? double.MinValue : double.MaxValue;
 
         var moves = board.GetLegalMoves().OrderByDescending(x => EstimateMoveImportance(x, _moveNumber + depth));
 
@@ -135,11 +137,10 @@ public class MyBot : IChessBot
                     playingAsWhite,
                     maxDepth + (!board.IsInCheck() && !move.IsCapture ? -1 : 0),
                     depth: depth + 1,
-                    maximizing: !maximizing,
                     bestMax: bestMax,
                     bestMin: bestMin);
 
-                if (maximizing)
+                if (isOurTurn)
                 {
                     if (score >= bestMin)
                     {
@@ -157,7 +158,7 @@ public class MyBot : IChessBot
                     }
                     bestMin = Math.Min(score, bestMin);
                 }
-                if (bestMove is null || maximizing && score > bestMoveScore || !maximizing && score < bestMoveScore)
+                if (bestMove is null || isOurTurn && score > bestMoveScore || !isOurTurn && score < bestMoveScore)
                 {
                     bestMoveScore = score;
                     bestMove = move;
