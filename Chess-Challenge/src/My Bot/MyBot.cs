@@ -63,7 +63,7 @@ public class MyBot : IChessBot
         var depth = 1;
         Move? move = null;
         var score = 0D;
-        var timeout = TimeSpan.FromMilliseconds(Math.Min(timer.MillisecondsRemaining - PanicThresholdMilliseconds, MaxThinkMilliseconds));
+        var timeout = TimeSpan.FromMilliseconds(Math.Min(Math.Max(timer.MillisecondsRemaining - PanicThresholdMilliseconds, 25), MaxThinkMilliseconds));
         var sameMoveCounter = 0;
 
         while (true)
@@ -72,19 +72,21 @@ public class MyBot : IChessBot
             double newScore;
             try
             {
-                Console.WriteLine($"Searching with a depth of {depth}");
+                Console.WriteLine($"Searching to a maximum depth of {depth}");
                 (newMove, newScore) = Minimax(board, timer, timeout, board.IsWhiteToMove, depth++);
             }
             catch (TimeoutException)
             {
                 break;
             }
-            sameMoveCounter += newMove == move ? 1 : 0;
+            if (depth >= 4)
+            {
+                sameMoveCounter += newMove == move ? 1 : 0;
+            }
             move = newMove;
             score = newScore;
-            _killerMoves[_moveNumber] = move!.Value; // explore this move first in the next iteration
 
-            if (depth >= 7 && sameMoveCounter >= 2)
+            if (sameMoveCounter >= 3)
             {
                 // we looked deeper, got the same move, send it.
                 break;
@@ -101,12 +103,9 @@ public class MyBot : IChessBot
     {
         if (depth >= 4 && timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
         {
-            // No threads means control of when to stop searching must be surrendered to the minimax method (no cancellation token stuff)
-            // Can think of no better way than to use exceptions.
             throw new TimeoutException();
         }
-
-        if (board.IsInCheckmate())
+        else if (board.IsInCheckmate())
         {
             return (null, board.IsWhiteToMove && playingAsWhite ? -1000 * (maxDepth - depth + 1) : 1000 * (maxDepth - depth + 1));
         }
@@ -134,7 +133,7 @@ public class MyBot : IChessBot
                     timer,
                     timeout,
                     playingAsWhite,
-                    maxDepth,
+                    maxDepth + (!board.IsInCheck() && !move.IsCapture ? -1 : 0),
                     depth: depth + 1,
                     maximizing: !maximizing,
                     bestMax: bestMax,
@@ -170,6 +169,7 @@ public class MyBot : IChessBot
             }
         }
 
+        _killerMoves[_moveNumber] = bestMove!.Value;
         return (bestMove, bestMoveScore);
     }
 
