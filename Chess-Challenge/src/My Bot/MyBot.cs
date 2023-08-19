@@ -6,7 +6,10 @@ using System.Linq;
 public class MyBot : IChessBot
 {
     private const int PanicThresholdMilliseconds = 2000;
-    private const int MaxThinkMilliseconds = 5000;
+    private const int MinThinkMilliseconds = 100;
+    private const int MaxThinkMilliseconds = 2000;
+
+    private const int MinCheckmateValue = 1000;
 
     private static readonly Dictionary<PieceType, double> PieceValues = new()
     {
@@ -66,31 +69,25 @@ public class MyBot : IChessBot
         var timeout = TimeSpan.FromMilliseconds(Math.Min(Math.Max(timer.MillisecondsRemaining - PanicThresholdMilliseconds, 25), MaxThinkMilliseconds));
         var sameMoveCounter = 0;
 
-        while (true)
+        while (Math.Abs(score) >= MinCheckmateValue || sameMoveCounter < 3 || timer.MillisecondsElapsedThisTurn < MinThinkMilliseconds)
         {
             Move? newMove;
             double newScore;
+
+            Console.WriteLine($"Searching to a maximum depth of {depth}");
             try
             {
-                Console.WriteLine($"Searching to a maximum depth of {depth}");
                 (newMove, newScore) = Minimax(board, timer, timeout, board.IsWhiteToMove, depth++);
             }
             catch (TimeoutException)
             {
                 break;
             }
-            if (depth >= 4)
-            {
-                sameMoveCounter += newMove == move ? 1 : 0;
-            }
+
+            sameMoveCounter += newMove == move ? 1 : 0;
+
             move = newMove;
             score = newScore;
-
-            if (sameMoveCounter >= 3)
-            {
-                // we looked deeper, got the same move, send it.
-                break;
-            }
         }
 
         Console.WriteLine(board.GetFenString());
@@ -101,15 +98,16 @@ public class MyBot : IChessBot
 
     private (Move? Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double bestMax = double.MinValue, double bestMin = double.MaxValue)
     {
-        var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
-
         if (depth >= 4 && timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
         {
             throw new TimeoutException();
         }
-        else if (board.IsInCheckmate())
+
+        var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
+
+        if (board.IsInCheckmate())
         {
-            return (null, isOurTurn ? -1000 * (maxDepth - depth + 1) : 1000 * (maxDepth - depth + 1));
+            return (null, isOurTurn ? -MinCheckmateValue * (maxDepth - depth + 1) : MinCheckmateValue * (maxDepth - depth + 1));
         }
         else if (board.IsDraw())
         {
@@ -135,7 +133,7 @@ public class MyBot : IChessBot
                     timer,
                     timeout,
                     playingAsWhite,
-                    maxDepth + (!board.IsInCheck() && !move.IsCapture ? -1 : 0),
+                    maxDepth,
                     depth: depth + 1,
                     bestMax: bestMax,
                     bestMin: bestMin);
@@ -144,8 +142,9 @@ public class MyBot : IChessBot
                 {
                     if (score >= bestMin)
                     {
-                        _killerMoves[depth + _moveNumber] = move;
-                        return (move, score);
+                        bestMove = move;
+                        bestMoveScore = score;
+                        break;
                     }
                     bestMax = Math.Max(score, bestMax);
                 }
@@ -153,8 +152,9 @@ public class MyBot : IChessBot
                 {
                     if (score <= bestMax)
                     {
-                        _killerMoves[depth + _moveNumber] = move;
-                        return (move, score);
+                        bestMove = move;
+                        bestMoveScore = score;
+                        break;
                     }
                     bestMin = Math.Min(score, bestMin);
                 }
@@ -170,7 +170,7 @@ public class MyBot : IChessBot
             }
         }
 
-        _killerMoves[_moveNumber] = bestMove!.Value;
+        _killerMoves[depth + _moveNumber] = bestMove!.Value;
         return (bestMove, bestMoveScore);
     }
 
