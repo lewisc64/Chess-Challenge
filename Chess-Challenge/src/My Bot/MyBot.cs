@@ -5,143 +5,133 @@ using System.Linq;
 
 public class MyBot : IChessBot
 {
-    private const int PanicThresholdMilliseconds = 2000;
-    private const int MinThinkMilliseconds = 100;
-    private const int MaxThinkMilliseconds = 2000;
+    private const double MinCheckmateValue = 1000;
 
-    private const int MinCheckmateValue = 1000;
-
-    private static readonly Dictionary<PieceType, double> PieceValues = new()
+    // "static" costs a token, but "readonly" doesn't?
+    private readonly double[] PieceValues = new[]
     {
-        { PieceType.Pawn, 1 },
-        { PieceType.Knight, 3 },
-        { PieceType.Bishop, 3 },
-        { PieceType.Rook, 5 },
-        { PieceType.Queen, 9 },
+        0,
+        1,
+        3,
+        3,
+        5,
+        9,
+        MinCheckmateValue,
     };
 
     private Random _random = new Random();
-    private int _moveNumber = 0;
-    private bool _skipOpening = false;
-    private Dictionary<int, Move> _killerMoves = new();
+    private Dictionary<(int Depth, ulong BoardHash), Move> _hashMoves = new();
+    private Dictionary<(int Depth, ulong BoardHash), (double Score, Move Move, bool Pog, bool AntiPog)> _transpositionTable = new();
+    private Dictionary<ulong, double> _evalCache = new();
 
     public Move Think(Board board, Timer timer)
     {
-        if (++_moveNumber == 1 && board.WhitePiecesBitboard != 65535 && board.BlackPiecesBitboard != 18446462598732840960)
-        {
-            _moveNumber = 50; // this isn't a normal start!
-        }
-
-        // Wayward queen attack. Not likely to trick an engine, but fun.
-        if (!_skipOpening && _moveNumber <= 2)
-        {
-            if (!board.GetPieceList(PieceType.Queen, board.IsWhiteToMove).Any())
-            {
-                _skipOpening = true;
-            }
-            else if (_moveNumber == 1)
-            {
-                if (!board.IsWhiteToMove && board.SquareIsAttackedByOpponent(new Square("e5")))
-                {
-                    _skipOpening = true;
-                }
-                else
-                {
-                    return new Move(board.IsWhiteToMove ? "e2e4" : "e7e5", board);
-                }
-            }
-            else if (_moveNumber == 2)
-            {
-                if (board.IsWhiteToMove && board.SquareIsAttackedByOpponent(new Square("h5")) || !board.IsWhiteToMove && board.SquareIsAttackedByOpponent(new Square("h4")))
-                {
-                    _skipOpening = true;
-                }
-                else
-                {
-                    return new Move(board.IsWhiteToMove ? "d1h5" : "d8h4", board);
-                }
-            }
-        }
-
+        _evalCache.Clear();
         var depth = 1;
-        Move? move = null;
+        var move = Move.NullMove;
         var score = 0D;
-        var timeout = TimeSpan.FromMilliseconds(Math.Min(Math.Max(timer.MillisecondsRemaining - PanicThresholdMilliseconds, 25), MaxThinkMilliseconds));
+        var timeout = TimeSpan.FromMilliseconds(Math.Min(Math.Max(timer.MillisecondsRemaining - 2000, 25), 2000));
         var sameMoveCounter = 0;
 
-        while (Math.Abs(score) >= MinCheckmateValue || sameMoveCounter < 3 || timer.MillisecondsElapsedThisTurn < MinThinkMilliseconds)
+        _hashMoves.Clear();
+        try
         {
-            Move? newMove;
-            double newScore;
-
-            Console.WriteLine($"Searching to a maximum depth of {depth}");
-            try
+            while (Math.Abs(score) < MinCheckmateValue && (sameMoveCounter < 3 || timer.MillisecondsElapsedThisTurn < 250))
             {
-                (newMove, newScore) = Minimax(board, timer, timeout, board.IsWhiteToMove, depth++);
-            }
-            catch (TimeoutException)
-            {
-                break;
-            }
+#if DEBUG
+                Console.WriteLine($"Searching with initial max depth of {depth}");
+#endif
+                _transpositionTable.Clear();
+                var (newMove, newScore) = Minimax(board, timer, timeout, board.IsWhiteToMove, depth++);
 
-            sameMoveCounter += newMove == move ? 1 : 0;
+                sameMoveCounter += newMove == move ? 1 : 0;
 
-            move = newMove;
-            score = newScore;
+                move = newMove;
+                score = newScore;
+            }
+        }
+        catch (TimeoutException)
+        {
+#if DEBUG
+            Console.WriteLine("(timed out)");
+#endif
         }
 
+#if DEBUG
         Console.WriteLine(board.GetFenString());
-        Console.WriteLine($"{move}, score: {score}");
+        Console.WriteLine($"Move: {move}, score: {score}");
+#endif
 
-        return move!.Value;
+        return move;
     }
 
-    private (Move? Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double bestMax = double.MinValue, double bestMin = double.MaxValue)
+    private (Move Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double bestMax = double.MinValue, double bestMin = double.MaxValue, Move previousMove = default)
     {
-        if (depth >= 4 && timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
+        if (timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
         {
             throw new TimeoutException();
         }
 
         var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
 
+        // why make me write if statements like this
         if (board.IsInCheckmate())
-        {
-            return (null, isOurTurn ? -MinCheckmateValue * (maxDepth - depth + 1) : MinCheckmateValue * (maxDepth - depth + 1));
-        }
+            return (Move.NullMove, (isOurTurn ? -MinCheckmateValue : MinCheckmateValue) * (maxDepth - depth + 1));
         else if (board.IsDraw())
-        {
-            return (null, 0);
-        }
+            return (Move.NullMove, 0);
         else if (depth >= maxDepth)
+            return (Move.NullMove, BoardEvaluation(board, playingAsWhite));
+
+        var depthBoardHashKey = (depth, board.ZobristKey);
+
+        if (_transpositionTable.TryGetValue(depthBoardHashKey, out var record))
         {
-            return (null, BoardEvaluation(board, playingAsWhite));
+            if (record.Pog)
+                bestMin = Math.Min(bestMin, record.Score);
+            else if (record.AntiPog)
+                bestMax = Math.Max(bestMax, record.Score);
+            else
+                return (record.Move, record.Score);
+            _hashMoves[depthBoardHashKey] = record.Move;
         }
 
-        Move? bestMove = null;
+        var bestMove = Move.NullMove;
         var bestMoveScore = isOurTurn ? double.MinValue : double.MaxValue;
 
-        var moves = board.GetLegalMoves().OrderByDescending(x => EstimateMoveImportance(x, _moveNumber + depth));
+        var pog = false;
+        var antiPog = false;
 
-        foreach (var move in moves)
+        _hashMoves.TryGetValue(depthBoardHashKey, out var hashMove);
+
+        foreach (var move in board.GetLegalMoves()
+            .OrderByDescending(x => EstimateMoveImportance(x))
+            .OrderByDescending(x => hashMove == x))
         {
             board.MakeMove(move);
             try
             {
+                var enshallow = !move.IsCapture
+                    && !board.IsInCheck();
+                    //&& !(move.MovePieceType == PieceType.Pawn && IsPassedPawn(board, move.TargetSquare, !board.IsWhiteToMove));
+                
+                var extend = move.IsCapture && previousMove.IsCapture && move.TargetSquare == previousMove.TargetSquare;
+                
                 var (_, score) = Minimax(
                     board,
                     timer,
                     timeout,
                     playingAsWhite,
-                    maxDepth,
+                    extend ? maxDepth + 1 : (enshallow ? maxDepth - depth / 3 : maxDepth),
                     depth: depth + 1,
                     bestMax: bestMax,
-                    bestMin: bestMin);
+                    bestMin: bestMin,
+                    previousMove: move);
 
                 if (isOurTurn)
                 {
                     if (score >= bestMin)
                     {
+                        pog = true;
                         bestMove = move;
                         bestMoveScore = score;
                         break;
@@ -152,13 +142,14 @@ public class MyBot : IChessBot
                 {
                     if (score <= bestMax)
                     {
+                        antiPog = true;
                         bestMove = move;
                         bestMoveScore = score;
                         break;
                     }
                     bestMin = Math.Min(score, bestMin);
                 }
-                if (bestMove is null || isOurTurn && score > bestMoveScore || !isOurTurn && score < bestMoveScore)
+                if (isOurTurn && score > bestMoveScore || !isOurTurn && score < bestMoveScore)
                 {
                     bestMoveScore = score;
                     bestMove = move;
@@ -170,73 +161,96 @@ public class MyBot : IChessBot
             }
         }
 
-        _killerMoves[depth + _moveNumber] = bestMove!.Value;
+        _hashMoves[depthBoardHashKey] = bestMove;
+        _transpositionTable[depthBoardHashKey] = (bestMoveScore, bestMove, pog, antiPog);
+
         return (bestMove, bestMoveScore);
     }
 
     // We value:
     //  - having pieces (obviously)
     //  - how many squares are threatened on the board
+    //  - not having threatened undefended pieces (such pieces are not counted in material cost)
+    //  - for pawns: being close to the opposite rank
+    //  - for all but pawns: being close to the enemy king
     private double BoardEvaluation(Board board, bool playingAsWhite)
     {
+        if (_evalCache.TryGetValue(board.ZobristKey, out var cachedEval))
+            return cachedEval;
+
         var evaluation = 0D;
 
-        for (var rank = 0; rank < 8; rank++)
+        var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
+
+        var allOurAttacksBitboard = GetColorAttacksBitboard(board, playingAsWhite);
+        var allTheirAttacksBitboard = GetColorAttacksBitboard(board, !playingAsWhite);
+
+        foreach (var piece in board.GetAllPieceLists().SelectMany(x => x))
         {
-            for (var file = 0; file < 8; file++)
+            var rank = piece.Square.Rank;
+            var file = piece.Square.File;
+            
+            double rankFactor;
+            if (piece.PieceType == PieceType.Pawn)
+                rankFactor = 1 + (1 - (piece.IsWhite ? rank + 1 : 8 - rank) / 8D) / 200;
+            else
             {
-                if (PiecePresentInBitboard(board.AllPiecesBitboard, file, rank))
+                var enemyKingSquare = board.GetKingSquare(!piece.IsWhite);
+                rankFactor = 1 + (1 - (Math.Abs(enemyKingSquare.Rank - rank) + Math.Abs(enemyKingSquare.File - file)) / 14D) / 200;
+            }
+
+            var pieceValue = PieceValues[(int)piece.PieceType] * rankFactor;
+            var threatenedSquares = BitboardHelper.GetNumberOfSetBits(BitboardHelper.GetPieceAttacks(piece.PieceType, piece.Square, board, piece.IsWhite));
+            if (!(playingAsWhite ^ piece.IsWhite)) // if our piece
+            {
+                if (isOurTurn || !BitboardHelper.SquareIsSet(~allOurAttacksBitboard & allTheirAttacksBitboard & (playingAsWhite ? board.WhitePiecesBitboard : board.BlackPiecesBitboard), piece.Square))
                 {
-                    var piece = board.GetPiece(new Square(file, rank));
-
-                    if (piece.PieceType != PieceType.King)
-                    {
-                        var pieceValue = PieceValues[piece.PieceType];
-                        var threatenedSquares = CountSetBits(BitboardHelper.GetPieceAttacks(piece.PieceType, piece.Square, board, piece.IsWhite));
-
-                        if (PiecePresentInBitboard(playingAsWhite ? board.WhitePiecesBitboard : board.BlackPiecesBitboard, file, rank))
-                        {
-                            evaluation += pieceValue;
-                            evaluation += threatenedSquares / 500D;
-                        }
-                        else
-                        {
-                            evaluation -= pieceValue;
-                            evaluation -= threatenedSquares / 500D;
-                        }
-                    }
+                    evaluation += pieceValue;
+                    evaluation += threatenedSquares / 500D;
                 }
             }
+            else if (!isOurTurn || !BitboardHelper.SquareIsSet(~allTheirAttacksBitboard & allOurAttacksBitboard & (playingAsWhite ? board.BlackPiecesBitboard : board.WhitePiecesBitboard), piece.Square))
+            {
+                evaluation -= pieceValue;
+                evaluation -= threatenedSquares / 500D;
+            }
         }
+
+        _evalCache[board.ZobristKey] = evaluation;
 
         return evaluation;
     }
 
-    private double EstimateMoveImportance(Move move, int turnNumber)
+    private double EstimateMoveImportance(Move move)
     {
-        if (_killerMoves.ContainsKey(turnNumber) && _killerMoves[turnNumber] == move)
+        var captureFactor = move.IsCapture ? PieceValues[(int)move.CapturePieceType] : 0;
+        var pieceValueFactor = move.MovePieceType == PieceType.King ? 0 : PieceValues[(int)move.MovePieceType];
+        return 10000 * captureFactor + 10 * pieceValueFactor + _random.NextDouble();
+    }
+    /*
+    private bool IsPassedPawn(Board board, Square square, bool isWhite)
+    {
+        var rank = square.Rank;
+        while (rank >= 0 && rank < 8)
         {
-            return double.MaxValue;
+            rank += isWhite ? 1 : -1;
+            if (BitboardHelper.SquareIsSet(board.AllPiecesBitboard, new Square(square.File, rank)))
+                return false;
+        }
+        return true;
+    }
+    */
+    private ulong GetColorAttacksBitboard(Board board, bool white)
+    {
+        var result = 0UL;
+        foreach (var pieceList in board.GetAllPieceLists())
+        {
+            if (pieceList.IsWhitePieceList ^ white)
+                continue;
+            foreach (var piece in pieceList)
+                result |= BitboardHelper.GetPieceAttacks(piece.PieceType, piece.Square, board, white);
         }
 
-        var captureFactor = move.IsCapture ? PieceValues[move.CapturePieceType] : 0;
-        var pieceValueFactor = move.MovePieceType == PieceType.King ? 0 : PieceValues[move.MovePieceType];
-        return 10000 * captureFactor + 100 * pieceValueFactor + _random.NextDouble();
-    }
-
-    private static bool PiecePresentInBitboard(ulong bitboard, int file, int rank)
-    {
-        return (bitboard & 1UL << (rank * 8 + file)) != 0;
-    }
-
-    private static int CountSetBits(ulong n)
-    {
-        var count = 0;
-        while (n != 0)
-        {
-            count++;
-            n &= n - 1;
-        }
-        return count;
+        return result;
     }
 }
