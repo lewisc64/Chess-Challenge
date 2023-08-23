@@ -20,13 +20,27 @@ public class MyBot : IChessBot
     };
 
     private Random _random = new Random();
-    private Dictionary<(int Depth, ulong BoardHash), Move> _hashMoves = new();
+    private Dictionary<ulong, Move> _hashMoves = new();
     private Dictionary<(int Depth, ulong BoardHash), (double Score, Move Move, bool Pog, bool AntiPog)> _transpositionTable = new();
     private Dictionary<ulong, double> _evalCache = new();
 
+#if DEBUG
+    private int _nodesSearched = 0;
+
+    private int _evalCacheHits = 0;
+    private int _evalCacheMisses = 0;
+
+    private int _transpositionTableHits = 0;
+    private int _transpositionTableCutoffs = 0;
+#endif
+
     public Move Think(Board board, Timer timer)
     {
+#if DEBUG
+        _evalCacheHits = 0;
+        _evalCacheMisses = 0;
         _evalCache.Clear();
+#endif
         var depth = 1;
         var move = Move.NullMove;
         var score = 0D;
@@ -36,15 +50,20 @@ public class MyBot : IChessBot
         _hashMoves.Clear();
         try
         {
-            while (Math.Abs(score) < MinCheckmateValue && (sameMoveCounter < 3 || timer.MillisecondsElapsedThisTurn < 250))
+            while (Math.Abs(score) < MinCheckmateValue && (sameMoveCounter < 2 || timer.MillisecondsElapsedThisTurn < 250))
             {
 #if DEBUG
-                Console.WriteLine($"Searching with initial max depth of {depth}");
+                _nodesSearched = 0;
+                _transpositionTableHits = 0;
+                _transpositionTableCutoffs = 0;
 #endif
                 _transpositionTable.Clear();
                 var (newMove, newScore) = Minimax(board, timer, timeout, board.IsWhiteToMove, depth++);
+#if DEBUG
+                Console.WriteLine($"{depth - 1, -3} {_nodesSearched, -8} {newMove, -12} {_transpositionTableCutoffs}/{_transpositionTableHits}");
+#endif
 
-                sameMoveCounter += newMove == move ? 1 : 0;
+                sameMoveCounter = newMove == move ? sameMoveCounter + 1 : 0;
 
                 move = newMove;
                 score = newScore;
@@ -58,8 +77,10 @@ public class MyBot : IChessBot
         }
 
 #if DEBUG
-        Console.WriteLine(board.GetFenString());
-        Console.WriteLine($"Move: {move}, score: {score}");
+        Console.WriteLine($"Eval cache hits: {_evalCacheHits * 100D / (_evalCacheHits + _evalCacheMisses):F2}%");
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"{move,-12} {score:F4}");
+        Console.ResetColor();
 #endif
 
         return move;
@@ -68,9 +89,11 @@ public class MyBot : IChessBot
     private (Move Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double bestMax = double.MinValue, double bestMin = double.MaxValue, Move previousMove = default)
     {
         if (timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
-        {
             throw new TimeoutException();
-        }
+
+#if DEBUG
+        _nodesSearched++;
+#endif
 
         var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
 
@@ -82,39 +105,52 @@ public class MyBot : IChessBot
         else if (depth >= maxDepth)
             return (Move.NullMove, BoardEvaluation(board, playingAsWhite));
 
-        var depthBoardHashKey = (depth, board.ZobristKey);
+        var transpositionTableKey = (depth, board.ZobristKey);
+        Move priorityMove;
 
-        if (_transpositionTable.TryGetValue(depthBoardHashKey, out var record))
+        if (_transpositionTable.TryGetValue(transpositionTableKey, out var record))
         {
+#if DEBUG
+            _transpositionTableHits++;
+            _transpositionTableCutoffs++;
+#endif
+
             if (record.Pog)
                 bestMin = Math.Min(bestMin, record.Score);
             else if (record.AntiPog)
                 bestMax = Math.Max(bestMax, record.Score);
             else
                 return (record.Move, record.Score);
-            _hashMoves[depthBoardHashKey] = record.Move;
+
+#if DEBUG
+            _transpositionTableCutoffs--;
+#endif
+
+            priorityMove = record.Move;
         }
+        else
+            _hashMoves.TryGetValue(board.ZobristKey, out priorityMove);
 
         var bestMove = Move.NullMove;
         var bestMoveScore = isOurTurn ? double.MinValue : double.MaxValue;
 
-        var pog = false;
-        var antiPog = false;
-
-        _hashMoves.TryGetValue(depthBoardHashKey, out var hashMove);
+        bool pog = false, antiPog = false;
 
         foreach (var move in board.GetLegalMoves()
             .OrderByDescending(x => EstimateMoveImportance(x))
-            .OrderByDescending(x => hashMove == x))
+            .OrderByDescending(x => priorityMove == x))
         {
             board.MakeMove(move);
             try
             {
+                var eval = BoardEvaluation(board, playingAsWhite);
+
                 var enshallow = !move.IsCapture
-                    && !board.IsInCheck();
+                    && !move.IsPromotion;
                     //&& !(move.MovePieceType == PieceType.Pawn && IsPassedPawn(board, move.TargetSquare, !board.IsWhiteToMove));
                 
-                var extend = move.IsCapture && previousMove.IsCapture && move.TargetSquare == previousMove.TargetSquare;
+                var extend = move.IsCapture && previousMove.IsCapture && move.TargetSquare == previousMove.TargetSquare
+                    || board.IsInCheck();
                 
                 var (_, score) = Minimax(
                     board,
@@ -161,8 +197,8 @@ public class MyBot : IChessBot
             }
         }
 
-        _hashMoves[depthBoardHashKey] = bestMove;
-        _transpositionTable[depthBoardHashKey] = (bestMoveScore, bestMove, pog, antiPog);
+        _hashMoves[board.ZobristKey] = bestMove;
+        _transpositionTable[transpositionTableKey] = (bestMoveScore, bestMove, pog, antiPog);
 
         return (bestMove, bestMoveScore);
     }
@@ -175,8 +211,15 @@ public class MyBot : IChessBot
     //  - for all but pawns: being close to the enemy king
     private double BoardEvaluation(Board board, bool playingAsWhite)
     {
+#if DEBUG
+        _evalCacheHits++;
+#endif
         if (_evalCache.TryGetValue(board.ZobristKey, out var cachedEval))
             return cachedEval;
+#if DEBUG
+        _evalCacheHits--;
+        _evalCacheMisses++;
+#endif
 
         var evaluation = 0D;
 
@@ -189,17 +232,17 @@ public class MyBot : IChessBot
         {
             var rank = piece.Square.Rank;
             var file = piece.Square.File;
-            
-            double rankFactor;
+
+            var pieceValue = PieceValues[(int)piece.PieceType];
+
             if (piece.PieceType == PieceType.Pawn)
-                rankFactor = 1 + (1 - (piece.IsWhite ? rank + 1 : 8 - rank) / 8D) / 200;
+                pieceValue *= 1 + (piece.IsWhite ? rank + 1 : 8 - rank) / 8D / 200;
             else
             {
                 var enemyKingSquare = board.GetKingSquare(!piece.IsWhite);
-                rankFactor = 1 + (1 - (Math.Abs(enemyKingSquare.Rank - rank) + Math.Abs(enemyKingSquare.File - file)) / 14D) / 200;
+                pieceValue *= 1 + (1 - (Math.Abs(enemyKingSquare.Rank - rank) + Math.Abs(enemyKingSquare.File - file)) / 14D) / 200;
             }
 
-            var pieceValue = PieceValues[(int)piece.PieceType] * rankFactor;
             var threatenedSquares = BitboardHelper.GetNumberOfSetBits(BitboardHelper.GetPieceAttacks(piece.PieceType, piece.Square, board, piece.IsWhite));
             if (!(playingAsWhite ^ piece.IsWhite)) // if our piece
             {
@@ -227,6 +270,7 @@ public class MyBot : IChessBot
         var pieceValueFactor = move.MovePieceType == PieceType.King ? 0 : PieceValues[(int)move.MovePieceType];
         return 10000 * captureFactor + 10 * pieceValueFactor + _random.NextDouble();
     }
+
     /*
     private bool IsPassedPawn(Board board, Square square, bool isWhite)
     {
