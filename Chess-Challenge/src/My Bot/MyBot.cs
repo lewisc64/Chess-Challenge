@@ -19,10 +19,14 @@ public class MyBot : IChessBot
         MinCheckmateValue,
     };
 
+    private Board _board; // Tiny chess bot. Why not globalize board and timer? Can't find reason not to.
+    private Timer _timer;
+
     private Random _random = new Random();
     private Dictionary<ulong, Move> _hashMoves = new();
-    private Dictionary<(int Depth, ulong BoardHash), (double Score, Move Move, bool Pog, bool AntiPog)> _transpositionTable = new();
+    private Dictionary<(int Depth, ulong BoardHash), (double Score, Move Move, bool BetaCutoff, bool AlphaCutoff)> _transpositionTable = new();
     private Dictionary<ulong, double> _evalCache = new();
+    private Move _searchBestMove = Move.NullMove;
 
 #if DEBUG
     private int _nodesSearched = 0;
@@ -36,76 +40,73 @@ public class MyBot : IChessBot
 
     public Move Think(Board board, Timer timer)
     {
+        _board = board;
+        _timer = timer;
+
 #if DEBUG
         _evalCacheHits = 0;
         _evalCacheMisses = 0;
         _evalCache.Clear();
 #endif
         var depth = 1;
-        var move = Move.NullMove;
+        var previousMove = Move.NullMove;
         var score = 0D;
         var timeout = TimeSpan.FromMilliseconds(Math.Min(Math.Max(timer.MillisecondsRemaining - 2000, 25), 2000));
         var sameMoveCounter = 0;
 
-        _hashMoves.Clear();
-        try
+        while (_timer.MillisecondsElapsedThisTurn < timeout.TotalMilliseconds && Math.Abs(score) < MinCheckmateValue && (sameMoveCounter < 2 || timer.MillisecondsElapsedThisTurn < 250))
         {
-            while (Math.Abs(score) < MinCheckmateValue && (sameMoveCounter < 2 || timer.MillisecondsElapsedThisTurn < 250))
+#if DEBUG
+            _nodesSearched = 0;
+            _transpositionTableHits = 0;
+            _transpositionTableCutoffs = 0;
+#endif
+            _transpositionTable.Clear();
+            var newScore = Search(timeout, board.IsWhiteToMove, depth++);
+#if DEBUG
+            Console.WriteLine($"{depth - 1, -3} {_nodesSearched, -8} {_searchBestMove, -12} {_transpositionTableCutoffs}/{_transpositionTableHits}");
+            if (_timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
             {
-#if DEBUG
-                _nodesSearched = 0;
-                _transpositionTableHits = 0;
-                _transpositionTableCutoffs = 0;
-#endif
-                _transpositionTable.Clear();
-                var (newMove, newScore) = Minimax(board, timer, timeout, board.IsWhiteToMove, depth++);
-#if DEBUG
-                Console.WriteLine($"{depth - 1, -3} {_nodesSearched, -8} {newMove, -12} {_transpositionTableCutoffs}/{_transpositionTableHits}");
-#endif
-
-                sameMoveCounter = newMove == move ? sameMoveCounter + 1 : 0;
-
-                move = newMove;
-                score = newScore;
+                Console.WriteLine("(timed out)");
             }
-        }
-        catch (TimeoutException)
-        {
-#if DEBUG
-            Console.WriteLine("(timed out)");
 #endif
+
+            sameMoveCounter = _searchBestMove == previousMove ? sameMoveCounter + 1 : 0;
+
+            previousMove = _searchBestMove;
+            score = newScore;
         }
 
 #if DEBUG
         Console.WriteLine($"Eval cache hits: {_evalCacheHits * 100D / (_evalCacheHits + _evalCacheMisses):F2}%");
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"{move,-12} {score:F4}");
+        Console.WriteLine($"{_searchBestMove,-12} {score:F4}");
         Console.ResetColor();
 #endif
 
-        return move;
+        return _searchBestMove;
     }
 
-    private (Move Move, double Score) Minimax(Board board, Timer timer, TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double bestMax = double.MinValue, double bestMin = double.MaxValue, Move previousMove = default)
+    private double Search(TimeSpan timeout, bool playingAsWhite, int maxDepth, int depth = 0, double alpha = double.MinValue, double beta = double.MaxValue, int extensionsRemaining = 16)
     {
-        if (timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
-            throw new TimeoutException();
+        if (_timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
+            return 0;
 
 #if DEBUG
         _nodesSearched++;
 #endif
 
-        var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
+        var isOurTurn = !(playingAsWhite ^ _board.IsWhiteToMove);
 
         // why make me write if statements like this
-        if (board.IsInCheckmate())
-            return (Move.NullMove, (isOurTurn ? -MinCheckmateValue : MinCheckmateValue) * (maxDepth - depth + 1));
-        else if (board.IsDraw())
-            return (Move.NullMove, 0);
+        if (_board.IsInCheckmate())
+            return (isOurTurn ? -MinCheckmateValue : MinCheckmateValue) * (maxDepth - depth + 1);
+        else if (_board.IsDraw())
+            return 0;
         else if (depth >= maxDepth)
-            return (Move.NullMove, BoardEvaluation(board, playingAsWhite));
+            return BoardEvaluation(playingAsWhite);
 
-        var transpositionTableKey = (depth, board.ZobristKey);
+        var transpositionTableKey = (depth, _board.ZobristKey);
         Move priorityMove;
 
         if (_transpositionTable.TryGetValue(transpositionTableKey, out var record))
@@ -115,12 +116,12 @@ public class MyBot : IChessBot
             _transpositionTableCutoffs++;
 #endif
 
-            if (record.Pog)
-                bestMin = Math.Min(bestMin, record.Score);
-            else if (record.AntiPog)
-                bestMax = Math.Max(bestMax, record.Score);
+            if (record.BetaCutoff)
+                beta = Math.Min(beta, record.Score);
+            else if (record.AlphaCutoff)
+                alpha = Math.Max(alpha, record.Score);
             else
-                return (record.Move, record.Score);
+                return record.Score;
 
 #if DEBUG
             _transpositionTableCutoffs--;
@@ -129,78 +130,77 @@ public class MyBot : IChessBot
             priorityMove = record.Move;
         }
         else
-            _hashMoves.TryGetValue(board.ZobristKey, out priorityMove);
+            _hashMoves.TryGetValue(_board.ZobristKey, out priorityMove);
 
         var bestMove = Move.NullMove;
         var bestMoveScore = isOurTurn ? double.MinValue : double.MaxValue;
 
-        bool pog = false, antiPog = false;
+        bool betaCutoff = false, alphaCutoff = false;
 
-        foreach (var move in board.GetLegalMoves()
+        foreach (var move in _board.GetLegalMoves()
             .OrderByDescending(x => EstimateMoveImportance(x))
             .OrderByDescending(x => priorityMove == x))
         {
-            board.MakeMove(move);
+            _board.MakeMove(move);
             try
             {
-                var eval = BoardEvaluation(board, playingAsWhite);
+                var eval = BoardEvaluation(playingAsWhite);
 
-                var enshallow = !move.IsCapture
-                    && !move.IsPromotion;
-                    //&& !(move.MovePieceType == PieceType.Pawn && IsPassedPawn(board, move.TargetSquare, !board.IsWhiteToMove));
-                
-                var extend = move.IsCapture && previousMove.IsCapture && move.TargetSquare == previousMove.TargetSquare
-                    || board.IsInCheck();
-                
-                var (_, score) = Minimax(
-                    board,
-                    timer,
+                var extend = extensionsRemaining >= 1
+                    && _board.IsInCheck();
+
+                var score = Search(
                     timeout,
                     playingAsWhite,
-                    extend ? maxDepth + 1 : (enshallow ? maxDepth - depth / 3 : maxDepth),
+                    extend ? maxDepth + 1 : maxDepth,
                     depth: depth + 1,
-                    bestMax: bestMax,
-                    bestMin: bestMin,
-                    previousMove: move);
+                    alpha: alpha,
+                    beta: beta,
+                    extensionsRemaining: extend ? extensionsRemaining - 1 : extensionsRemaining);
+
+                if (_timer.MillisecondsElapsedThisTurn >= timeout.TotalMilliseconds)
+                    return 0;
 
                 if (isOurTurn)
                 {
-                    if (score >= bestMin)
+                    if (score >= beta)
                     {
-                        pog = true;
+                        betaCutoff = true;
                         bestMove = move;
                         bestMoveScore = score;
                         break;
                     }
-                    bestMax = Math.Max(score, bestMax);
+                    alpha = Math.Max(score, alpha);
                 }
                 else
                 {
-                    if (score <= bestMax)
+                    if (score <= alpha)
                     {
-                        antiPog = true;
+                        alphaCutoff = true;
                         bestMove = move;
                         bestMoveScore = score;
                         break;
                     }
-                    bestMin = Math.Min(score, bestMin);
+                    beta = Math.Min(score, beta);
                 }
                 if (isOurTurn && score > bestMoveScore || !isOurTurn && score < bestMoveScore)
                 {
                     bestMoveScore = score;
                     bestMove = move;
+                    if (depth == 0)
+                        _searchBestMove = move;
                 }
             }
             finally
             {
-                board.UndoMove(move);
+                _board.UndoMove(move);
             }
         }
 
-        _hashMoves[board.ZobristKey] = bestMove;
-        _transpositionTable[transpositionTableKey] = (bestMoveScore, bestMove, pog, antiPog);
+        _hashMoves[_board.ZobristKey] = bestMove;
+        _transpositionTable[transpositionTableKey] = (bestMoveScore, bestMove, betaCutoff, alphaCutoff);
 
-        return (bestMove, bestMoveScore);
+        return bestMoveScore;
     }
 
     // We value:
@@ -209,57 +209,50 @@ public class MyBot : IChessBot
     //  - not having threatened undefended pieces (such pieces are not counted in material cost)
     //  - for pawns: being close to the opposite rank
     //  - for all but pawns: being close to the enemy king
-    private double BoardEvaluation(Board board, bool playingAsWhite)
+    private double BoardEvaluation(bool playingAsWhite)
     {
 #if DEBUG
         _evalCacheHits++;
 #endif
-        if (_evalCache.TryGetValue(board.ZobristKey, out var cachedEval))
+        if (_evalCache.TryGetValue(_board.ZobristKey, out var cachedEval))
             return cachedEval;
 #if DEBUG
         _evalCacheHits--;
         _evalCacheMisses++;
 #endif
-
         var evaluation = 0D;
 
-        var isOurTurn = !(playingAsWhite ^ board.IsWhiteToMove);
+        var isOurTurn = !(playingAsWhite ^ _board.IsWhiteToMove);
+        var allOurAttacksBitboard = GetColorAttacksBitboard(_board, playingAsWhite);
+        var allTheirAttacksBitboard = GetColorAttacksBitboard(_board, !playingAsWhite);
 
-        var allOurAttacksBitboard = GetColorAttacksBitboard(board, playingAsWhite);
-        var allTheirAttacksBitboard = GetColorAttacksBitboard(board, !playingAsWhite);
-
-        foreach (var piece in board.GetAllPieceLists().SelectMany(x => x))
+        // material (hanging pieces do not count)
+        foreach (var piece in _board.GetAllPieceLists().SelectMany(x => x))
         {
             var rank = piece.Square.Rank;
             var file = piece.Square.File;
 
             var pieceValue = PieceValues[(int)piece.PieceType];
 
-            if (piece.PieceType == PieceType.Pawn)
-                pieceValue *= 1 + (piece.IsWhite ? rank + 1 : 8 - rank) / 8D / 200;
-            else
-            {
-                var enemyKingSquare = board.GetKingSquare(!piece.IsWhite);
-                pieceValue *= 1 + (1 - (Math.Abs(enemyKingSquare.Rank - rank) + Math.Abs(enemyKingSquare.File - file)) / 14D) / 200;
-            }
-
-            var threatenedSquares = BitboardHelper.GetNumberOfSetBits(BitboardHelper.GetPieceAttacks(piece.PieceType, piece.Square, board, piece.IsWhite));
             if (!(playingAsWhite ^ piece.IsWhite)) // if our piece
             {
-                if (isOurTurn || !BitboardHelper.SquareIsSet(~allOurAttacksBitboard & allTheirAttacksBitboard & (playingAsWhite ? board.WhitePiecesBitboard : board.BlackPiecesBitboard), piece.Square))
+                if (isOurTurn || !BitboardHelper.SquareIsSet(~allOurAttacksBitboard & allTheirAttacksBitboard & (playingAsWhite ? _board.WhitePiecesBitboard : _board.BlackPiecesBitboard), piece.Square))
                 {
                     evaluation += pieceValue;
-                    evaluation += threatenedSquares / 500D;
                 }
             }
-            else if (!isOurTurn || !BitboardHelper.SquareIsSet(~allTheirAttacksBitboard & allOurAttacksBitboard & (playingAsWhite ? board.BlackPiecesBitboard : board.WhitePiecesBitboard), piece.Square))
+            else if (!isOurTurn || !BitboardHelper.SquareIsSet(~allTheirAttacksBitboard & allOurAttacksBitboard & (playingAsWhite ? _board.BlackPiecesBitboard : _board.WhitePiecesBitboard), piece.Square))
             {
                 evaluation -= pieceValue;
-                evaluation -= threatenedSquares / 500D;
             }
         }
 
-        _evalCache[board.ZobristKey] = evaluation;
+        // center control (0.1 of a pawn)
+        ulong centerBitboard = 0b0000000000000000001111000011110000111100001111000000000000000000;
+        var centerControl = (BitboardHelper.GetNumberOfSetBits(allOurAttacksBitboard & centerBitboard) - BitboardHelper.GetNumberOfSetBits(allTheirAttacksBitboard & centerBitboard)) / 16D;
+        evaluation += centerControl / 10;
+
+        _evalCache[_board.ZobristKey] = evaluation;
 
         return evaluation;
     }
@@ -271,19 +264,6 @@ public class MyBot : IChessBot
         return 10000 * captureFactor + 10 * pieceValueFactor + _random.NextDouble();
     }
 
-    /*
-    private bool IsPassedPawn(Board board, Square square, bool isWhite)
-    {
-        var rank = square.Rank;
-        while (rank >= 0 && rank < 8)
-        {
-            rank += isWhite ? 1 : -1;
-            if (BitboardHelper.SquareIsSet(board.AllPiecesBitboard, new Square(square.File, rank)))
-                return false;
-        }
-        return true;
-    }
-    */
     private ulong GetColorAttacksBitboard(Board board, bool white)
     {
         var result = 0UL;
