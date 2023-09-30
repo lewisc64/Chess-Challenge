@@ -7,7 +7,6 @@ public class MyBot : IChessBot
 {
     private const double MinCheckmateValue = 1000;
 
-    // "static" costs a token, but "readonly" doesn't?
     private readonly double[] PieceValues = new[]
     {
         0,
@@ -19,7 +18,7 @@ public class MyBot : IChessBot
         MinCheckmateValue,
     };
 
-    private Board _board; // Tiny chess bot. Why not globalize board and timer? Can't find reason not to.
+    private Board _board;
     private Timer _timer;
 
     private Random _random = new Random();
@@ -98,7 +97,6 @@ public class MyBot : IChessBot
 
         var isOurTurn = !(playingAsWhite ^ _board.IsWhiteToMove);
 
-        // why make me write if statements like this
         if (_board.IsInCheckmate())
             return (isOurTurn ? -MinCheckmateValue : MinCheckmateValue) * (maxDepth - depth + 1);
         else if (_board.IsDraw())
@@ -205,10 +203,8 @@ public class MyBot : IChessBot
 
     // We value:
     //  - having pieces (obviously)
-    //  - how many squares are threatened on the board
+    //  - how many squares are threatened in the center of the board
     //  - not having threatened undefended pieces (such pieces are not counted in material cost)
-    //  - for pawns: being close to the opposite rank
-    //  - for all but pawns: being close to the enemy king
     private double BoardEvaluation(bool playingAsWhite)
     {
 #if DEBUG
