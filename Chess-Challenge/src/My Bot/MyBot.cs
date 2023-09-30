@@ -24,14 +24,10 @@ public class MyBot : IChessBot
     private Random _random = new Random();
     private Dictionary<ulong, Move> _hashMoves = new();
     private Dictionary<(int Depth, ulong BoardHash), (double Score, Move Move, bool BetaCutoff, bool AlphaCutoff)> _transpositionTable = new();
-    private Dictionary<ulong, double> _evalCache = new();
     private Move _searchBestMove = Move.NullMove;
 
 #if DEBUG
     private int _nodesSearched = 0;
-
-    private int _evalCacheHits = 0;
-    private int _evalCacheMisses = 0;
 
     private int _transpositionTableHits = 0;
     private int _transpositionTableCutoffs = 0;
@@ -42,11 +38,6 @@ public class MyBot : IChessBot
         _board = board;
         _timer = timer;
 
-#if DEBUG
-        _evalCacheHits = 0;
-        _evalCacheMisses = 0;
-        _evalCache.Clear();
-#endif
         var depth = 1;
         var previousMove = Move.NullMove;
         var score = 0D;
@@ -68,16 +59,15 @@ public class MyBot : IChessBot
             {
                 Console.WriteLine("(timed out)");
             }
+            else
+                score = newScore;
 #endif
 
             sameMoveCounter = _searchBestMove == previousMove ? sameMoveCounter + 1 : 0;
-
             previousMove = _searchBestMove;
-            score = newScore;
         }
 
 #if DEBUG
-        Console.WriteLine($"Eval cache hits: {_evalCacheHits * 100D / (_evalCacheHits + _evalCacheMisses):F2}%");
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"{_searchBestMove,-12} {score:F4}");
         Console.ResetColor();
@@ -207,15 +197,6 @@ public class MyBot : IChessBot
     //  - not having threatened undefended pieces (such pieces are not counted in material cost)
     private double BoardEvaluation(bool playingAsWhite)
     {
-#if DEBUG
-        _evalCacheHits++;
-#endif
-        if (_evalCache.TryGetValue(_board.ZobristKey, out var cachedEval))
-            return cachedEval;
-#if DEBUG
-        _evalCacheHits--;
-        _evalCacheMisses++;
-#endif
         var evaluation = 0D;
 
         var isOurTurn = !(playingAsWhite ^ _board.IsWhiteToMove);
@@ -247,8 +228,6 @@ public class MyBot : IChessBot
         ulong centerBitboard = 0b0000000000000000001111000011110000111100001111000000000000000000;
         var centerControl = (BitboardHelper.GetNumberOfSetBits(allOurAttacksBitboard & centerBitboard) - BitboardHelper.GetNumberOfSetBits(allTheirAttacksBitboard & centerBitboard)) / 16D;
         evaluation += centerControl / 10;
-
-        _evalCache[_board.ZobristKey] = evaluation;
 
         return evaluation;
     }
